@@ -4,9 +4,7 @@
 "wsn_node1\stm32f1xx_it.o"
 "wsn_node1\stm32f1xx_hal_msp.o"
 "wsn_node1\stm32f1xx_hal_gpio_ex.o"
-"wsn_node1\stm32f1xx_hal_tim.o"
-"wsn_node1\stm32f1xx_hal_tim_ex.o"
-"wsn_node1\stm32f1xx_hal_uart.o"
+"wsn_node1\stm32f1xx_hal_i2c.o"
 "wsn_node1\stm32f1xx_hal.o"
 "wsn_node1\stm32f1xx_hal_rcc.o"
 "wsn_node1\stm32f1xx_hal_rcc_ex.o"
@@ -17,7 +15,11 @@
 "wsn_node1\stm32f1xx_hal_flash.o"
 "wsn_node1\stm32f1xx_hal_flash_ex.o"
 "wsn_node1\stm32f1xx_hal_exti.o"
+"wsn_node1\stm32f1xx_hal_tim.o"
+"wsn_node1\stm32f1xx_hal_tim_ex.o"
+"wsn_node1\stm32f1xx_hal_uart.o"
 "wsn_node1\system_stm32f1xx.o"
+"wsn_node1\aht20.o"
 --strict --scatter "WSN_Node1\WSN_Node1.sct"
 --summary_stderr --info summarysizes --map --load_addr_map_info --xref --callgraph --symbols
 --info sizes --info totals --info unused --info veneers
