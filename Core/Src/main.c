@@ -39,7 +39,9 @@
 
 /* Private macro -------------------------------------------------------------*/
 /* USER CODE BEGIN PM */
-
+#define FLASH_CFG_ADDR  0x0800FC00
+#define RX_BUF_SIZE 128
+#define CFG_MAGIC  0xA5A55A5A
 /* USER CODE END PM */
 
 /* Private variables ---------------------------------------------------------*/
@@ -52,7 +54,6 @@ UART_HandleTypeDef huart2;
 
 /* USER CODE BEGIN PV */
 char node_id[] = "0001"; 
-#define RX_BUF_SIZE 128
 volatile uint8_t  rx_byte;                    
 volatile uint8_t  rx_buf[RX_BUF_SIZE];        
 volatile uint16_t rx_idx = 0;
@@ -67,12 +68,52 @@ static void MX_USART2_UART_Init(void);
 static void MX_I2C1_Init(void);
 static void MX_RTC_Init(void);
 /* USER CODE BEGIN PFP */
-	float t = 20.0f;
-	float h = 50.3f;
+float t = 20.0f;
+float h = 50.3f;
+typedef struct {
+    float Temp_Th;
+    float Hum_Th;
+    uint32_t magic;   
+} node_config_t;
+node_config_t node_config ;
 /* USER CODE END PFP */
 
 /* Private user code ---------------------------------------------------------*/
 /* USER CODE BEGIN 0 */
+void Flash_SaveConfig(node_config_t *cfg){
+	HAL_FLASH_Unlock();
+  FLASH_EraseInitTypeDef erase = {0};
+  uint32_t page_error = 0;
+  erase.TypeErase = FLASH_TYPEERASE_PAGES;
+  erase.PageAddress = FLASH_CFG_ADDR;
+  erase.NbPages = 1;
+  HAL_FLASHEx_Erase(&erase, &page_error);
+	uint32_t addr = FLASH_CFG_ADDR;
+	const uint32_t *p = (const uint32_t*)cfg;
+	for (uint32_t i = 0; i < sizeof(node_config_t)/4; i++){
+		HAL_FLASH_Program(FLASH_TYPEPROGRAM_WORD, addr, p[i]);
+		addr += 4;
+	}
+	HAL_FLASH_Lock();
+}
+bool Flash_LoadConfig(node_config_t *cfg)
+{
+	const node_config_t *flash_cfg = (const node_config_t*)FLASH_CFG_ADDR;
+	if (flash_cfg->magic != CFG_MAGIC)
+		return false;   
+	memcpy(cfg, flash_cfg, sizeof(node_config_t));
+  return true;
+}
+void Config_Init(void)
+{
+	if (!Flash_LoadConfig(&node_config)){
+		node_config.Temp_Th = 30.0f;
+		node_config.Hum_Th  = 40.0f;
+		node_config.magic     = CFG_MAGIC;
+		Flash_SaveConfig(&node_config);
+   }
+}
+
 volatile uint8_t dem=0;
 void HAL_RTC_AlarmAEventCallback(RTC_HandleTypeDef *hrtc)
 {
@@ -217,7 +258,40 @@ bool send_data_with_ack(float hum, float temp)
     }
     return false;
 }
-
+#define CFG_RESP_TIMEOUT_MS  2000
+#define MAX_CFG_RETRIES      5
+bool request_config_update(float *temp_th,float *hum_th){
+	char line[64];
+	for (int attempt=0 ; attempt < MAX_CFG_RETRIES; attempt++)
+	{
+		// Gui CONFIG?|id
+		char msg[32];
+		snprintf(msg, sizeof(msg),"CONFIG?|%s\r\n",node_id);
+		LoRa_UART_Send(msg);
+		int len = LoRa_WaitLine(line, sizeof(line),CFG_RESP_TIMEOUT_MS);
+		if(len>0){
+			if(strncmp(line,"CFG|",4)==0){
+				char id[8] = {0};
+				if (sscanf(line, "CFG|%7[^|]|TempTh: %f HumTh: %f", id, temp_th, hum_th) == 3){
+					if (strcmp(id, node_id) == 0)
+						return true; // có config m?i
+				}
+			}
+			if(strncmp(line, "NO|", 3) == 0)
+			{
+				char id[8];
+				if (sscanf(line, "NO|%7s", id) == 1)
+				{
+					if (strcmp(id, node_id) == 0)
+						return false; // không có config
+					}
+				}
+		}
+		HAL_Delay(200);
+	}
+	return false;
+}
+float new_TempTh,new_HumTh;
 /* USER CODE END 0 */
 
 /**
@@ -254,6 +328,7 @@ int main(void)
   MX_I2C1_Init();
   MX_RTC_Init();
   /* USER CODE BEGIN 2 */
+	Config_Init();
 	AHT20_Init(&hi2c1);
 	HAL_UART_Receive_IT(&huart1, (uint8_t*)&rx_byte, 1);
   /* USER CODE END 2 */
@@ -268,6 +343,16 @@ int main(void)
 		if(can_send){
 			// 2) Gui DATA & cho ACK
 			bool sent_ok = send_data_with_ack(h, t);
+			if(sent_ok){
+//				float new_TempTh,new_HumTh;
+				bool has_cfg=request_config_update(&new_TempTh,&new_HumTh);
+				if(has_cfg){
+					node_config.Temp_Th = new_TempTh;
+          node_config.Hum_Th = new_HumTh;
+					node_config.magic= CFG_MAGIC;
+					Flash_SaveConfig(&node_config);
+				}
+			}
 		}
 //		HAL_Delay(10000);
 		EnterStop();
@@ -489,7 +574,6 @@ static void MX_USART2_UART_Init(void)
   */
 static void MX_GPIO_Init(void)
 {
-  GPIO_InitTypeDef GPIO_InitStruct = {0};
 /* USER CODE BEGIN MX_GPIO_Init_1 */
 /* USER CODE END MX_GPIO_Init_1 */
 
@@ -497,16 +581,6 @@ static void MX_GPIO_Init(void)
   __HAL_RCC_GPIOC_CLK_ENABLE();
   __HAL_RCC_GPIOA_CLK_ENABLE();
   __HAL_RCC_GPIOB_CLK_ENABLE();
-
-  /*Configure GPIO pin Output Level */
-  HAL_GPIO_WritePin(GPIOC, GPIO_PIN_13, GPIO_PIN_RESET);
-
-  /*Configure GPIO pin : PC13 */
-  GPIO_InitStruct.Pin = GPIO_PIN_13;
-  GPIO_InitStruct.Mode = GPIO_MODE_OUTPUT_PP;
-  GPIO_InitStruct.Pull = GPIO_NOPULL;
-  GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_LOW;
-  HAL_GPIO_Init(GPIOC, &GPIO_InitStruct);
 
 /* USER CODE BEGIN MX_GPIO_Init_2 */
 /* USER CODE END MX_GPIO_Init_2 */
