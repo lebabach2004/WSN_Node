@@ -50,7 +50,6 @@ I2C_HandleTypeDef hi2c1;
 RTC_HandleTypeDef hrtc;
 
 UART_HandleTypeDef huart1;
-UART_HandleTypeDef huart2;
 
 /* USER CODE BEGIN PV */
 char node_id[] = "0001"; 
@@ -64,7 +63,6 @@ volatile bool line_ready = false;
 void SystemClock_Config(void);
 static void MX_GPIO_Init(void);
 static void MX_USART1_UART_Init(void);
-static void MX_USART2_UART_Init(void);
 static void MX_I2C1_Init(void);
 static void MX_RTC_Init(void);
 /* USER CODE BEGIN PFP */
@@ -73,13 +71,28 @@ float h = 50.3f;
 typedef struct {
     float Temp_Th;
     float Hum_Th;
+		int period_sec;
     uint32_t magic;   
 } node_config_t;
 node_config_t node_config ;
+
+float new_TempTh,new_HumTh;
+int period ;
+
 /* USER CODE END PFP */
 
 /* Private user code ---------------------------------------------------------*/
 /* USER CODE BEGIN 0 */
+void LoRa_Sleep(void)
+{
+	HAL_GPIO_WritePin(GPIOA, GPIO_PIN_0 | GPIO_PIN_3, GPIO_PIN_SET);
+}
+void LoRa_Wakeup_And_Stabilize(void)
+{
+  HAL_GPIO_WritePin(GPIOA, GPIO_PIN_0 | GPIO_PIN_3, GPIO_PIN_RESET);   
+	HAL_Delay(100);
+}
+
 void Flash_SaveConfig(node_config_t *cfg){
 	HAL_FLASH_Unlock();
   FLASH_EraseInitTypeDef erase = {0};
@@ -109,6 +122,7 @@ void Config_Init(void)
 	if (!Flash_LoadConfig(&node_config)){
 		node_config.Temp_Th = 30.0f;
 		node_config.Hum_Th  = 40.0f;
+		node_config.period_sec = 30;
 		node_config.magic     = CFG_MAGIC;
 		Flash_SaveConfig(&node_config);
    }
@@ -137,12 +151,14 @@ void RTC_SetAlarm_AfterSecond(uint32_t sec){
   }
 }
 void EnterStop(void){
-	RTC_SetAlarm_AfterSecond(20);
+	LoRa_Sleep();
+	RTC_SetAlarm_AfterSecond(node_config.period_sec);
 	HAL_SuspendTick();                
 	__HAL_PWR_CLEAR_FLAG(PWR_FLAG_WU);
 	HAL_PWR_EnterSTOPMode(PWR_LOWPOWERREGULATOR_ON, PWR_STOPENTRY_WFI);
 	HAL_ResumeTick();      
   SystemClock_Config();
+	LoRa_Wakeup_And_Stabilize();
 }
 void LoRa_UART_Send(const char *str)
 {
@@ -208,7 +224,6 @@ bool request_send_permission(void)
 			LoRa_UART_Send(msg);
 			// 2) Cho OK|id
 			int len = LoRa_WaitLine(line, sizeof(line), SEND_RESP_TIMEOUT_MS);
-			HAL_UART_Transmit(&huart2, (uint8_t*)line, strlen(line), 1000);
 			if (len > 0)
 			{
 				// vi du: "OK|0001\r\n"
@@ -241,7 +256,6 @@ bool send_data_with_ack(float hum, float temp)
 			LoRa_UART_Send(msg);
 			// 2) Cho ACK|id
 			int len = LoRa_WaitLine(line, sizeof(line), DATA_ACK_TIMEOUT_MS);
-			HAL_UART_Transmit(&huart2, (uint8_t*)line, strlen(line), 1000);
 			if (len > 0)
       {
 				// vi du: "ACK|0001\r\n"
@@ -260,7 +274,7 @@ bool send_data_with_ack(float hum, float temp)
 }
 #define CFG_RESP_TIMEOUT_MS  2000
 #define MAX_CFG_RETRIES      5
-bool request_config_update(float *temp_th,float *hum_th){
+bool request_config_update(float *temp_th,float *hum_th, int *period_sec){
 	char line[64];
 	for (int attempt=0 ; attempt < MAX_CFG_RETRIES; attempt++)
 	{
@@ -272,7 +286,7 @@ bool request_config_update(float *temp_th,float *hum_th){
 		if(len>0){
 			if(strncmp(line,"CFG|",4)==0){
 				char id[8] = {0};
-				if (sscanf(line, "CFG|%7[^|]|TempTh: %f HumTh: %f", id, temp_th, hum_th) == 3){
+				if (sscanf(line, "CFG|%7[^|]|TempTh: %f HumTh: %f Period: %d", id, temp_th, hum_th, period_sec) == 4){
 					if (strcmp(id, node_id) == 0)
 						return true; // có config m?i
 				}
@@ -291,7 +305,6 @@ bool request_config_update(float *temp_th,float *hum_th){
 	}
 	return false;
 }
-float new_TempTh,new_HumTh;
 /* USER CODE END 0 */
 
 /**
@@ -324,7 +337,6 @@ int main(void)
   /* Initialize all configured peripherals */
   MX_GPIO_Init();
   MX_USART1_UART_Init();
-  MX_USART2_UART_Init();
   MX_I2C1_Init();
   MX_RTC_Init();
   /* USER CODE BEGIN 2 */
@@ -345,10 +357,11 @@ int main(void)
 			bool sent_ok = send_data_with_ack(h, t);
 			if(sent_ok){
 //				float new_TempTh,new_HumTh;
-				bool has_cfg=request_config_update(&new_TempTh,&new_HumTh);
+				bool has_cfg=request_config_update(&new_TempTh,&new_HumTh,&period);
 				if(has_cfg){
 					node_config.Temp_Th = new_TempTh;
           node_config.Hum_Th = new_HumTh;
+					node_config.period_sec = period;
 					node_config.magic= CFG_MAGIC;
 					Flash_SaveConfig(&node_config);
 				}
@@ -535,45 +548,13 @@ static void MX_USART1_UART_Init(void)
 }
 
 /**
-  * @brief USART2 Initialization Function
-  * @param None
-  * @retval None
-  */
-static void MX_USART2_UART_Init(void)
-{
-
-  /* USER CODE BEGIN USART2_Init 0 */
-
-  /* USER CODE END USART2_Init 0 */
-
-  /* USER CODE BEGIN USART2_Init 1 */
-
-  /* USER CODE END USART2_Init 1 */
-  huart2.Instance = USART2;
-  huart2.Init.BaudRate = 9600;
-  huart2.Init.WordLength = UART_WORDLENGTH_8B;
-  huart2.Init.StopBits = UART_STOPBITS_1;
-  huart2.Init.Parity = UART_PARITY_NONE;
-  huart2.Init.Mode = UART_MODE_TX_RX;
-  huart2.Init.HwFlowCtl = UART_HWCONTROL_NONE;
-  huart2.Init.OverSampling = UART_OVERSAMPLING_16;
-  if (HAL_UART_Init(&huart2) != HAL_OK)
-  {
-    Error_Handler();
-  }
-  /* USER CODE BEGIN USART2_Init 2 */
-
-  /* USER CODE END USART2_Init 2 */
-
-}
-
-/**
   * @brief GPIO Initialization Function
   * @param None
   * @retval None
   */
 static void MX_GPIO_Init(void)
 {
+  GPIO_InitTypeDef GPIO_InitStruct = {0};
 /* USER CODE BEGIN MX_GPIO_Init_1 */
 /* USER CODE END MX_GPIO_Init_1 */
 
@@ -581,6 +562,16 @@ static void MX_GPIO_Init(void)
   __HAL_RCC_GPIOC_CLK_ENABLE();
   __HAL_RCC_GPIOA_CLK_ENABLE();
   __HAL_RCC_GPIOB_CLK_ENABLE();
+
+  /*Configure GPIO pin Output Level */
+  HAL_GPIO_WritePin(GPIOA, GPIO_PIN_0|GPIO_PIN_3, GPIO_PIN_RESET);
+
+  /*Configure GPIO pins : PA0 PA3 */
+  GPIO_InitStruct.Pin = GPIO_PIN_0|GPIO_PIN_3;
+  GPIO_InitStruct.Mode = GPIO_MODE_OUTPUT_PP;
+  GPIO_InitStruct.Pull = GPIO_NOPULL;
+  GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_LOW;
+  HAL_GPIO_Init(GPIOA, &GPIO_InitStruct);
 
 /* USER CODE BEGIN MX_GPIO_Init_2 */
 /* USER CODE END MX_GPIO_Init_2 */
