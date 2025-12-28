@@ -45,6 +45,8 @@
 /* USER CODE END PM */
 
 /* Private variables ---------------------------------------------------------*/
+ADC_HandleTypeDef hadc1;
+
 I2C_HandleTypeDef hi2c1;
 
 RTC_HandleTypeDef hrtc;
@@ -65,24 +67,37 @@ static void MX_GPIO_Init(void);
 static void MX_USART1_UART_Init(void);
 static void MX_I2C1_Init(void);
 static void MX_RTC_Init(void);
+static void MX_ADC1_Init(void);
 /* USER CODE BEGIN PFP */
-float t = 20.0f;
-float h = 50.3f;
+static float t = 20.0f;
+static float h = 50.3f;
+static float soil = 30.0f;
 typedef struct {
     float Temp_Th;
     float Hum_Th;
+		float Soil_Th;
 		int period_sec;
     uint32_t magic;   
 } node_config_t;
 node_config_t node_config ;
 
-float new_TempTh,new_HumTh;
+float new_TempTh,new_HumTh,new_Soil;
 int period ;
 
 /* USER CODE END PFP */
 
 /* Private user code ---------------------------------------------------------*/
 /* USER CODE BEGIN 0 */
+
+float ReadSoil_ADC(void) {
+  HAL_ADC_Start(&hadc1);
+  HAL_ADC_PollForConversion(&hadc1, 20);
+  uint16_t tmp= (uint16_t)HAL_ADC_GetValue(&hadc1);
+	HAL_ADC_Stop(&hadc1);
+	float soil_hum = (4095 - tmp) * 100.0f / (4095 - 0);
+	return soil_hum;
+}
+
 void LoRa_Sleep(void)
 {
 	HAL_GPIO_WritePin(GPIOA, GPIO_PIN_0 | GPIO_PIN_3, GPIO_PIN_SET);
@@ -121,7 +136,8 @@ void Config_Init(void)
 {
 	if (!Flash_LoadConfig(&node_config)){
 		node_config.Temp_Th = 30.0f;
-		node_config.Hum_Th  = 40.0f;
+		node_config.Hum_Th  = 50.0f;
+		node_config.Soil_Th  = 30.0f;
 		node_config.period_sec = 30;
 		node_config.magic     = CFG_MAGIC;
 		Flash_SaveConfig(&node_config);
@@ -245,14 +261,14 @@ bool request_send_permission(void)
 #define MAX_DATA_RETRIES        50
 #define DATA_ACK_TIMEOUT_MS     2000  // 2s cho ACK
 
-bool send_data_with_ack(float hum, float temp)
+bool send_data_with_ack(float hum, float temp, float soil)
 {
     char line[64];
     for (int attempt = 0; attempt < MAX_DATA_RETRIES; attempt++)
     {
 			// 1) Gui DATA|id|Hum: .. Tmp: ..
 			char msg[64];
-			snprintf(msg, sizeof(msg), "DATA|%s|Hum: %.1f Tmp: %.1f\r\n", node_id, hum, temp);
+			snprintf(msg, sizeof(msg), "DATA|%s|Hum: %.1f Tmp: %.1f Soil: %.1f\r\n", node_id, hum, temp, soil);
 			LoRa_UART_Send(msg);
 			// 2) Cho ACK|id
 			int len = LoRa_WaitLine(line, sizeof(line), DATA_ACK_TIMEOUT_MS);
@@ -274,7 +290,7 @@ bool send_data_with_ack(float hum, float temp)
 }
 #define CFG_RESP_TIMEOUT_MS  2000
 #define MAX_CFG_RETRIES      5
-bool request_config_update(float *temp_th,float *hum_th, int *period_sec){
+bool request_config_update(float *temp_th,float *hum_th,float *soil_th, int *period_sec){
 	char line[64];
 	for (int attempt=0 ; attempt < MAX_CFG_RETRIES; attempt++)
 	{
@@ -286,7 +302,7 @@ bool request_config_update(float *temp_th,float *hum_th, int *period_sec){
 		if(len>0){
 			if(strncmp(line,"CFG|",4)==0){
 				char id[8] = {0};
-				if (sscanf(line, "CFG|%7[^|]|TempTh: %f HumTh: %f Period: %d", id, temp_th, hum_th, period_sec) == 4){
+				if (sscanf(line, "CFG|%7[^|]|TempTh: %f HumTh: %f SoilTh: %f Period: %d", id, temp_th, hum_th,soil_th, period_sec) == 5){
 					if (strcmp(id, node_id) == 0)
 						return true; // có config m?i
 				}
@@ -339,10 +355,14 @@ int main(void)
   MX_USART1_UART_Init();
   MX_I2C1_Init();
   MX_RTC_Init();
+  MX_ADC1_Init();
   /* USER CODE BEGIN 2 */
 	Config_Init();
 	AHT20_Init(&hi2c1);
+//	HAL_GPIO_WritePin(GPIOA, GPIO_PIN_0 | GPIO_PIN_3, GPIO_PIN_RESET);
 	HAL_UART_Receive_IT(&huart1, (uint8_t*)&rx_byte, 1);
+	HAL_ADCEx_Calibration_Start(&hadc1); 
+
   /* USER CODE END 2 */
 
   /* Infinite loop */
@@ -350,24 +370,31 @@ int main(void)
   while (1)
   {
 		AHT20_Read(&hi2c1,&t,&h);
+		soil = ReadSoil_ADC();
 		// 1) Xin quyen gui
 		bool can_send = request_send_permission();
 		if(can_send){
 			// 2) Gui DATA & cho ACK
-			bool sent_ok = send_data_with_ack(h, t);
+			bool sent_ok = send_data_with_ack(h, t, soil);
 			if(sent_ok){
 //				float new_TempTh,new_HumTh;
-				bool has_cfg=request_config_update(&new_TempTh,&new_HumTh,&period);
+				bool has_cfg=request_config_update(&new_TempTh,&new_HumTh,&new_Soil,&period);
 				if(has_cfg){
 					node_config.Temp_Th = new_TempTh;
           node_config.Hum_Th = new_HumTh;
+					node_config.Soil_Th = new_Soil;
 					node_config.period_sec = period;
 					node_config.magic= CFG_MAGIC;
 					Flash_SaveConfig(&node_config);
 				}
 			}
 		}
-//		HAL_Delay(10000);
+		if( h >= node_config.Hum_Th || t>= node_config.Temp_Th ){
+			HAL_GPIO_WritePin(GREEN_GPIO_Port,GREEN_Pin, GPIO_PIN_SET);
+		}
+		else{
+			HAL_GPIO_WritePin(RED_GPIO_Port,RED_Pin, GPIO_PIN_SET);			
+		}
 		EnterStop();
     /* USER CODE END WHILE */
 
@@ -414,12 +441,60 @@ void SystemClock_Config(void)
   {
     Error_Handler();
   }
-  PeriphClkInit.PeriphClockSelection = RCC_PERIPHCLK_RTC;
+  PeriphClkInit.PeriphClockSelection = RCC_PERIPHCLK_RTC|RCC_PERIPHCLK_ADC;
   PeriphClkInit.RTCClockSelection = RCC_RTCCLKSOURCE_LSI;
+  PeriphClkInit.AdcClockSelection = RCC_ADCPCLK2_DIV6;
   if (HAL_RCCEx_PeriphCLKConfig(&PeriphClkInit) != HAL_OK)
   {
     Error_Handler();
   }
+}
+
+/**
+  * @brief ADC1 Initialization Function
+  * @param None
+  * @retval None
+  */
+static void MX_ADC1_Init(void)
+{
+
+  /* USER CODE BEGIN ADC1_Init 0 */
+
+  /* USER CODE END ADC1_Init 0 */
+
+  ADC_ChannelConfTypeDef sConfig = {0};
+
+  /* USER CODE BEGIN ADC1_Init 1 */
+
+  /* USER CODE END ADC1_Init 1 */
+
+  /** Common config
+  */
+  hadc1.Instance = ADC1;
+  hadc1.Init.ScanConvMode = ADC_SCAN_DISABLE;
+  hadc1.Init.ContinuousConvMode = DISABLE;
+  hadc1.Init.DiscontinuousConvMode = DISABLE;
+  hadc1.Init.ExternalTrigConv = ADC_SOFTWARE_START;
+  hadc1.Init.DataAlign = ADC_DATAALIGN_RIGHT;
+  hadc1.Init.NbrOfConversion = 1;
+  if (HAL_ADC_Init(&hadc1) != HAL_OK)
+  {
+    Error_Handler();
+  }
+
+  /** Configure Regular Channel
+  */
+  sConfig.Channel = ADC_CHANNEL_1;
+  sConfig.Rank = ADC_REGULAR_RANK_1;
+  sConfig.SamplingTime = ADC_SAMPLETIME_71CYCLES_5;
+  if (HAL_ADC_ConfigChannel(&hadc1, &sConfig) != HAL_OK)
+  {
+    Error_Handler();
+  }
+  /* USER CODE BEGIN ADC1_Init 2 */
+
+  /* USER CODE END ADC1_Init 2 */
+
 }
 
 /**
@@ -564,10 +639,13 @@ static void MX_GPIO_Init(void)
   __HAL_RCC_GPIOB_CLK_ENABLE();
 
   /*Configure GPIO pin Output Level */
-  HAL_GPIO_WritePin(GPIOA, GPIO_PIN_0|GPIO_PIN_3, GPIO_PIN_RESET);
+  HAL_GPIO_WritePin(GPIOA, GPIO_PIN_0|GPIO_PIN_3|RED_Pin, GPIO_PIN_RESET);
 
-  /*Configure GPIO pins : PA0 PA3 */
-  GPIO_InitStruct.Pin = GPIO_PIN_0|GPIO_PIN_3;
+  /*Configure GPIO pin Output Level */
+  HAL_GPIO_WritePin(GREEN_GPIO_Port, GREEN_Pin, GPIO_PIN_SET);
+
+  /*Configure GPIO pins : PA0 PA3 GREEN_Pin RED_Pin */
+  GPIO_InitStruct.Pin = GPIO_PIN_0|GPIO_PIN_3|GREEN_Pin|RED_Pin;
   GPIO_InitStruct.Mode = GPIO_MODE_OUTPUT_PP;
   GPIO_InitStruct.Pull = GPIO_NOPULL;
   GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_LOW;
