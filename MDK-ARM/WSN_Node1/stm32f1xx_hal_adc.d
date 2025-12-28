@@ -1,5 +1,5 @@
-wsn_node1/stm32f1xx_hal_tim_ex.o: \
-  ..\Drivers\STM32F1xx_HAL_Driver\Src\stm32f1xx_hal_tim_ex.c \
+wsn_node1/stm32f1xx_hal_adc.o: \
+  ..\Drivers\STM32F1xx_HAL_Driver\Src\stm32f1xx_hal_adc.c \
   ..\Drivers\STM32F1xx_HAL_Driver\Inc\stm32f1xx_hal.h \
   ..\Core\Inc\stm32f1xx_hal_conf.h \
   ..\Drivers\STM32F1xx_HAL_Driver\Inc\stm32f1xx_hal_rcc.h \
