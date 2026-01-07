@@ -25,6 +25,7 @@
 #include "string.h"
 #include "stdbool.h"
 #include "stdio.h"
+#include <stdlib.h>
 /* USER CODE END Includes */
 
 /* Private typedef -----------------------------------------------------------*/
@@ -54,11 +55,19 @@ RTC_HandleTypeDef hrtc;
 UART_HandleTypeDef huart1;
 
 /* USER CODE BEGIN PV */
-char node_id[] = "0001"; 
+char node_id[] = "0002"; 
 volatile uint8_t  rx_byte;                    
 volatile uint8_t  rx_buf[RX_BUF_SIZE];        
 volatile uint16_t rx_idx = 0;
 volatile bool line_ready = false;   
+#define CMD_SEND_REQUEST   0x01  
+#define CMD_SEND_OK        0x02  
+#define CMD_SENSOR_DATA    0x03  
+#define CMD_DATA_ACK       0x04  
+#define CMD_CFG_REQUEST    0x05  
+#define CMD_CFG_DATA       0x07  
+#define CMD_CFG_NOCHANGE   0x06 
+#define HEADER_BYTE        0xAA
 /* USER CODE END PV */
 
 /* Private function prototypes -----------------------------------------------*/
@@ -176,87 +185,60 @@ void EnterStop(void){
   SystemClock_Config();
 	LoRa_Wakeup_And_Stabilize();
 }
-void LoRa_UART_Send(const char *str)
+void LoRa_UART_Send(uint8_t *buf, uint16_t len)
 {
-    HAL_UART_Transmit(&huart1, (uint8_t*)str, strlen(str), 1000);
+    HAL_UART_Transmit(&huart1, buf, len, 1000);
 }
 void HAL_UART_RxCpltCallback(UART_HandleTypeDef *huart)
 {
-    if (huart->Instance == USART1 )
+    if (huart->Instance == USART1)
     {
-			uint8_t ch = rx_byte;
-			if (!line_ready)  
-			{
-				if (rx_idx < RX_BUF_SIZE - 1)
-				{
-					rx_buf[rx_idx++] = ch;
-					if (ch == '\n')   
-					{
-						rx_buf[rx_idx] = '\0';
-						line_ready = true;
-					}
-				}
-				else
-				{
-					rx_idx = 0;
-				}
-			}
-			HAL_UART_Receive_IT(&huart1, (uint8_t*)&rx_byte, 1);
+        if (rx_idx < RX_BUF_SIZE)
+        {
+            rx_buf[rx_idx++] = rx_byte;
+        }
+        HAL_UART_Receive_IT(&huart1, (uint8_t*)&rx_byte, 1);
     }
 }
 // Cho 1 dong moi tu RX (toi '\n') voi timeout_ms
 // copy vào buf (size maxlen), return: so byte (0 = timeout)
-int LoRa_WaitLine(char *buf, uint16_t maxlen, uint32_t timeout_ms)
+int LoRa_WaitLine(uint8_t *buf, uint16_t len, uint32_t timeout_ms)
 {
 		uint32_t start = HAL_GetTick();
     while ((HAL_GetTick() - start) < timeout_ms)
     {
-			if (line_ready)
-			{
-				// copy safely
-				uint16_t len = rx_idx;
-				if (len >= maxlen) len = maxlen - 1;
-				memcpy(buf, (const char*)rx_buf, len);
-				buf[len]='\0';
-				// reset trang thái cho dong sau
-				rx_idx = 0;
-				line_ready = false;
-				return len;
-			}
+			  if (rx_idx >= len)
+        {
+         memcpy(buf, (const uint8_t*)rx_buf, len);
+         rx_idx = 0;
+         return len;
+        }
     }
     return 0;  // timeout
 }
 #define MAX_SEND_RETRIES        50
 #define SEND_RESP_TIMEOUT_MS    2000  // 2s cho OK
-bool request_send_permission(void)
-{
-    char line[64];
-
-    for (int attempt = 0; attempt < MAX_SEND_RETRIES; attempt++)
-    {
-			// 1) Gui SEND|id
-			char msg[32];
-			snprintf(msg, sizeof(msg), "SEND|%s\r\n", node_id);
-			LoRa_UART_Send(msg);
-			// 2) Cho OK|id
-			int len = LoRa_WaitLine(line, sizeof(line), SEND_RESP_TIMEOUT_MS);
-			if (len > 0)
-			{
-				// vi du: "OK|0001\r\n"
-				if (strncmp(line, "OK|", 3) == 0)
-				{
-					char id[8] = {0};
-					if (sscanf(line + 3, "%7s", id) == 1){
-						if (strcmp(id, node_id) == 0){
-							// Duoc phep gui Data
-							return true;
-						}
-					}
-				}
-			}
-      HAL_Delay(200);
-    }
-    return false; 
+bool request_send_permission(void) { 
+	char line[20]; 
+	uint8_t p[4]; 
+		p[0] = 0xAA; 
+		uint16_t id = (uint16_t)strtol(node_id, NULL, 16); 
+		p[1] = (id >> 8) & 0xFF; 
+		p[2] = id & 0xFF;
+		p[3] = CMD_SEND_REQUEST ;
+	for (int attempt = 0; attempt < MAX_SEND_RETRIES; attempt++) 
+	{ 
+		LoRa_UART_Send(p,4); 
+		uint8_t resp[4]; 
+		int len= LoRa_WaitLine(resp,sizeof(resp),SEND_RESP_TIMEOUT_MS);
+		if(len ==4){
+			if( resp[0] == 0xAA && resp[3] == CMD_SEND_OK && resp[1] == p[1] && resp[2] == p[2]){
+				return true;
+			}			
+		}
+		HAL_Delay(200);
+	}
+	return false;
 }
 #define MAX_DATA_RETRIES        50
 #define DATA_ACK_TIMEOUT_MS     2000  // 2s cho ACK
@@ -264,24 +246,25 @@ bool request_send_permission(void)
 bool send_data_with_ack(float hum, float temp, float soil)
 {
     char line[64];
+		uint8_t frame[16];
+    uint16_t id = (uint16_t)strtol(node_id, NULL, 16);
+    frame[0] = 0xAA;
+    frame[1] = (id >> 8) & 0xFF;
+    frame[2] = id & 0xFF;
+    frame[3] = CMD_SENSOR_DATA;
+    memcpy((void*)&frame[4],  &hum,  4);
+    memcpy((void*)&frame[8],  &temp, 4);
+    memcpy((void*)&frame[12], &soil, 4);
     for (int attempt = 0; attempt < MAX_DATA_RETRIES; attempt++)
     {
-			// 1) Gui DATA|id|Hum: .. Tmp: ..
-			char msg[64];
-			snprintf(msg, sizeof(msg), "DATA|%s|Hum: %.1f Tmp: %.1f Soil: %.1f\r\n", node_id, hum, temp, soil);
-			LoRa_UART_Send(msg);
+			LoRa_UART_Send(frame,16);
 			// 2) Cho ACK|id
-			int len = LoRa_WaitLine(line, sizeof(line), DATA_ACK_TIMEOUT_MS);
-			if (len > 0)
+			uint8_t r[4];
+			int len = LoRa_WaitLine(r, 4, DATA_ACK_TIMEOUT_MS);
+			if (len == 4)
       {
-				// vi du: "ACK|0001\r\n"
-				if (strncmp(line, "ACK|", 4) == 0){
-					char id[8] = {0};
-					if (sscanf(line + 4, "%7s", id) == 1){
-						if (strcmp(id, node_id) == 0){
-							return true;  // gui ok
-						}
-					}
+				if (r[0] == HEADER_BYTE && r[3] == CMD_DATA_ACK && r[1] == frame[1] && r[2] == frame[2]){
+					return true;
 				}
 			}
         HAL_Delay(200); // retry
@@ -291,32 +274,49 @@ bool send_data_with_ack(float hum, float temp, float soil)
 #define CFG_RESP_TIMEOUT_MS  2000
 #define MAX_CFG_RETRIES      5
 bool request_config_update(float *temp_th,float *hum_th,float *soil_th, int *period_sec){
-	char line[64];
+	uint8_t q[4];
+	uint16_t id = (uint16_t)strtol(node_id, NULL, 16);
+  q[0] = HEADER_BYTE;
+  q[1] = (id >> 8) & 0xFF;
+  q[2] = id & 0xFF;
+  q[3] = CMD_CFG_REQUEST;
 	for (int attempt=0 ; attempt < MAX_CFG_RETRIES; attempt++)
 	{
-		// Gui CONFIG?|id
-		char msg[32];
-		snprintf(msg, sizeof(msg),"CONFIG?|%s\r\n",node_id);
-		LoRa_UART_Send(msg);
-		int len = LoRa_WaitLine(line, sizeof(line),CFG_RESP_TIMEOUT_MS);
-		if(len>0){
-			if(strncmp(line,"CFG|",4)==0){
-				char id[8] = {0};
-				if (sscanf(line, "CFG|%7[^|]|TempTh: %f HumTh: %f SoilTh: %f Period: %d", id, temp_th, hum_th,soil_th, period_sec) == 5){
-					if (strcmp(id, node_id) == 0)
-						return true; // có config m?i
-				}
+		LoRa_UART_Send(q,4);
+		uint8_t r4[4];
+		int len4 = LoRa_WaitLine(r4, 4 ,CFG_RESP_TIMEOUT_MS);
+		if (len4 == 4 && r4[0] == HEADER_BYTE && r4[1] == q[1] && r4[2] == q[2]){
+        if (r4[3] == CMD_CFG_NOCHANGE){
+					return false; 
+         }
+         if (r4[3] == CMD_CFG_DATA){
+						uint8_t r20[20];
+            r20[0] = r4[0];
+            r20[1] = r4[1];
+            r20[2] = r4[2];
+						r20[3] = r4[3];
+            int len20 = LoRa_WaitLine(&r20[4], 16, CFG_RESP_TIMEOUT_MS);
+						if (len20 == 16)
+						{
+								memcpy(temp_th,    &r20[4],  4);
+								memcpy(hum_th,     &r20[8],  4);
+								memcpy(soil_th,    &r20[12], 4);
+								memcpy(period_sec, &r20[16], 4);
+								return true;
+						}
 			}
-			if(strncmp(line, "NO|", 3) == 0)
-			{
-				char id[8];
-				if (sscanf(line, "NO|%7s", id) == 1)
-				{
-					if (strcmp(id, node_id) == 0)
-						return false; // không có config
-					}
-				}
 		}
+//		if(len>0){
+//			if (r[0] == HEADER_BYTE && r[3] == CMD_CFG_NOCHANGE)
+//				return false;
+//			if (r[0] == HEADER_BYTE && r[3] == CMD_CFG_DATA && r[1] == q[1] && r[2] == q[2] ){
+//				memcpy(temp_th, &r[4], 4);
+//        memcpy(hum_th, &r[8], 4);
+//        memcpy(soil_th, &r[12], 4);
+//				memcpy(period_sec, &r[16], 4);
+//				return true;
+//			}
+//		}
 		HAL_Delay(200);
 	}
 	return false;
